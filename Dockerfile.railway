@@ -1,0 +1,1 @@
+FROM docker.io/kiwitcms/kiwi:latest
