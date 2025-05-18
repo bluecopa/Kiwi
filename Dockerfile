@@ -1,50 +1,59 @@
-# checkov:skip=CKV_DOCKER_7:Ensure the base image uses a non latest version tag
-FROM registry.access.redhat.com/ubi9-minimal
+# Use a more accessible base image
+FROM python:3.11-slim
 
-RUN microdnf -y module enable nginx:1.22 && \
-    microdnf -y --nodocs install python3.11 mariadb-connector-c libpq \
-    nginx-core sscg tar glibc-langpack-en && \
-    microdnf -y --nodocs update && \
-    microdnf clean all
+# Install dependencies
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    nginx \
+    postgresql-client \
+    mariadb-client \
+    gettext \
+    sscg \
+    tar \
+    locales && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
 
-HEALTHCHECK CMD curl --fail -k -H "Referer: healthcheck" https://127.0.0.1:8443/accounts/login/
-EXPOSE 8080
-EXPOSE 8443
-COPY ./httpd-foreground /httpd-foreground
-CMD /httpd-foreground
+# Set locale
+RUN sed -i -e 's/# en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen && \
+    locale-gen
+ENV LANG en_US.UTF-8
+ENV LC_ALL en_US.UTF-8
 
-ENV PATH=/venv/bin:${PATH} \
-    VIRTUAL_ENV=/venv      \
-    LC_ALL=en_US.UTF-8     \
-    LANG=en_US.UTF-8       \
-    LANGUAGE=en_US.UTF-8
+# Continue with the standard Kiwi TCMS installation
+COPY ./requirements/ /Kiwi/requirements/
+RUN pip install --no-cache-dir -r /Kiwi/requirements/postgres.txt
 
-# copy virtualenv dir which has been built inside the kiwitcms/buildroot container
-# this helps keep -devel dependencies outside of this image
-COPY ./dist/venv/ /venv
+# Create necessary directories
+RUN mkdir -p /Kiwi/ssl /var/run/nginx /var/log/nginx /var/log/kiwi /Kiwi/uploads
 
+# Copy application code
 COPY ./manage.py /Kiwi/
-# create directories so we can properly set ownership for them
-RUN mkdir -p /Kiwi/ssl /Kiwi/static /Kiwi/uploads /Kiwi/etc/cron.jobs
-COPY ./etc/*.conf /Kiwi/etc/
-COPY ./etc/cron.jobs/* /Kiwi/etc/cron.jobs/
+COPY ./etc/kiwitcms/ /Kiwi/etc/kiwitcms/
+COPY ./tcms/ /Kiwi/tcms/
+COPY ./templates/ /Kiwi/templates/
+COPY ./static/ /Kiwi/static/
 
-# generate self-signed SSL certificate
-RUN /usr/bin/sscg -v -f \
-    --country BG --locality Sofia \
-    --organization "Kiwi TCMS" \
-    --organizational-unit "Quality Engineering" \
-    --ca-file       /Kiwi/static/ca.crt     \
-    --cert-file     /Kiwi/ssl/localhost.crt \
-    --cert-key-file /Kiwi/ssl/localhost.key
-RUN sed -i "s/tcms.settings.devel/tcms.settings.product/" /Kiwi/manage.py && \
-    ln -s /Kiwi/ssl/localhost.crt /etc/pki/tls/certs/localhost.crt && \
-    ln -s /Kiwi/ssl/localhost.key /etc/pki/tls/private/localhost.key
+# Configure Nginx
+COPY ./etc/nginx/nginx.conf /etc/nginx/
+COPY ./etc/nginx/conf.d/default.conf /etc/nginx/conf.d/
 
+# Set permissions
+RUN chown -R 1001:1001 /Kiwi /var/run/nginx /var/log/nginx /var/log/kiwi
 
-# collect static files
-RUN /Kiwi/manage.py collectstatic --noinput --link
+# Set the working directory
+WORKDIR /Kiwi
 
-# from now on execute as non-root
-RUN chown -R 1001 /Kiwi/ /venv/
+# Update static files
+RUN SECRET_KEY=temporary KIWI_DONT_ENFORCE_HTTPS="yes" python manage.py collectstatic --noinput
+
+# Expose ports
+EXPOSE 8080 8443
+
+# Set entrypoint
+COPY ./etc/docker/entrypoint.sh /
+ENTRYPOINT ["/entrypoint.sh"]
+CMD ["wsgi"]
+
+# Set user
 USER 1001
